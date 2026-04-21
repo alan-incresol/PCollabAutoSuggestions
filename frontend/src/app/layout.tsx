@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Vendor search",
+  title: "PCollab AutoSuggestions",
   description: "Atlas Search suggestions for vendor details",
 };
 
