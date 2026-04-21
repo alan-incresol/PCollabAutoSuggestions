@@ -1,0 +1,11 @@
+[
+  {
+    $search: {
+      index: "vendorDetails-lucene",
+      autocomplete: {
+        query: "Jharsuguda",
+        path: "vendorDetails.vendorAddressDetails.city"
+      }
+    }
+  }
+]
