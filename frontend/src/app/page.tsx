@@ -63,33 +63,71 @@ export default function Home() {
   const filtersReady =
     orgId.trim() !== "" && (!requiresOrgOpuId || orgOpuId.trim() !== "");
 
+  const collectionNameRef = useRef("");
+
+  const applyConfig = useCallback((config: Awaited<ReturnType<typeof fetchAppConfig>>) => {
+    const collectionChanged =
+      collectionNameRef.current !== "" &&
+      collectionNameRef.current !== config.collectionName;
+    collectionNameRef.current = config.collectionName;
+    setFieldOptions(config.fields);
+    setCollectionName(config.collectionName);
+    setRequiresOrgOpuId(config.requiresOrgOpuId);
+    if (collectionChanged) {
+      setOrgOpuId("");
+      setSelected(new Set());
+      setQuery("");
+      setResult(null);
+      setConfirmedQuery(null);
+      setSuggestions([]);
+      setError(null);
+    }
+  }, []);
+
   useEffect(() => {
     const ac = new AbortController();
-    setConfigLoading(true);
-    setConfigError(null);
-    fetchAppConfig({ signal: ac.signal })
-      .then((config) => {
-        setFieldOptions(config.fields);
-        setCollectionName(config.collectionName);
-        setRequiresOrgOpuId(config.requiresOrgOpuId);
-        setOrgOpuId("");
-        setSelected(new Set());
-        setResult(null);
-        setConfirmedQuery(null);
-        setSuggestions([]);
-      })
-      .catch((e) => {
-        if (ac.signal.aborted) return;
-        setFieldOptions([]);
-        setCollectionName("");
-        setRequiresOrgOpuId(true);
-        setConfigError(e instanceof Error ? e.message : "Failed to load config");
-      })
-      .finally(() => {
-        if (!ac.signal.aborted) setConfigLoading(false);
-      });
-    return () => ac.abort();
-  }, []);
+    let active = true;
+
+    const loadConfig = (initial: boolean) => {
+      if (initial) {
+        setConfigLoading(true);
+        setConfigError(null);
+      }
+      fetchAppConfig({ signal: ac.signal })
+        .then((config) => {
+          if (!active) return;
+          applyConfig(config);
+          setConfigError(null);
+        })
+        .catch((e) => {
+          if (ac.signal.aborted || !active) return;
+          if (initial) {
+            setFieldOptions([]);
+            setCollectionName("");
+            collectionNameRef.current = "";
+            setRequiresOrgOpuId(true);
+          }
+          setConfigError(e instanceof Error ? e.message : "Failed to load config");
+        })
+        .finally(() => {
+          if (active && initial) setConfigLoading(false);
+        });
+    };
+
+    const refreshConfig = () => {
+      if (document.visibilityState === "visible") loadConfig(false);
+    };
+
+    loadConfig(true);
+    document.addEventListener("visibilitychange", refreshConfig);
+    window.addEventListener("focus", refreshConfig);
+    return () => {
+      active = false;
+      ac.abort();
+      document.removeEventListener("visibilitychange", refreshConfig);
+      window.removeEventListener("focus", refreshConfig);
+    };
+  }, [applyConfig]);
 
   const toggleField = useCallback((id: string) => {
     setSelected((prev) => {

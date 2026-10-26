@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from config import settings
+from config import get_settings, settings
 from db import get_collection
 from search_registry import (
     COLLECTION_REGISTRY,
@@ -97,7 +97,7 @@ class AppConfigResponse(BaseModel):
 def _resolve_target(
     collection_name: str | None, index_override: str | None
 ) -> tuple[str, str, dict[str, str], bool]:
-    raw = collection_name or settings.collection_name
+    raw = collection_name or get_settings().collection_name
     try:
         coll = resolve_collection_name(raw)
     except ValueError as e:
@@ -177,7 +177,7 @@ def health():
 
 @app.get("/config", response_model=AppConfigResponse)
 def app_config():
-    config = get_collection_config(settings.collection_name)
+    config = get_collection_config(get_settings().collection_name)
     return AppConfigResponse(**config)
 
 
@@ -207,7 +207,7 @@ def suggest(body: SuggestRequest):
             field_paths,
             requires_org_opu_id,
         ),
-        {"$limit": settings.search_result_limit},
+        {"$limit": get_settings().search_result_limit},
     ]
 
     try:
@@ -258,7 +258,7 @@ def search(body: SearchRequest):
             field_paths,
             requires_org_opu_id,
         ),
-        {"$limit": settings.search_result_limit},
+        {"$limit": get_settings().search_result_limit},
     ]
 
     try:
