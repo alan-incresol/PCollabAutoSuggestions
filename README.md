@@ -2,6 +2,8 @@
 
 A vendor search application with autocomplete powered by MongoDB Atlas Search. The backend is a FastAPI service that runs aggregation queries against a MongoDB Atlas collection, and the frontend is a Next.js app that provides a real-time search UI.
 
+**API documentation** for the DataLine-hosted autosuggest used in PCollab Advanced Filters: see the DataLine repo at `backend/docs/AUTOSUGGEST_API.md` (short pointer: [docs/AUTOSUGGEST_API.md](docs/AUTOSUGGEST_API.md)).
+
 ## Prerequisites
 
 - Python 3.10+

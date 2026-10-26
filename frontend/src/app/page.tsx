@@ -1,27 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  suggestVendors,
-  searchVendors,
+  suggestPR,
+  searchPR,
+  fetchAppConfig,
   type SearchResponse,
+  type FieldConfig,
 } from "@/lib/api";
-
-const FIELD_OPTIONS: { id: string; label: string }[] = [
-  { id: "city", label: "City" },
-  { id: "gstin", label: "GSTIN" },
-  { id: "pointOfContactName", label: "Point of contact" },
-  { id: "contactEmail", label: "Contact email" },
-  { id: "vendorCode", label: "Vendor code" },
-  { id: "erpSyncMsg", label: "ERP sync message" },
-  { id: "companyName", label: "Company name" },
-];
 
 function getPath(obj: unknown, path: string[]): unknown {
   let cur: unknown = obj;
   for (const p of path) {
     if (Array.isArray(cur)) {
-      // Walk into the first element of the array
       if (cur.length === 0) return undefined;
       cur = cur[0];
     }
@@ -33,21 +24,25 @@ function getPath(obj: unknown, path: string[]): unknown {
   return cur;
 }
 
-function summaryLine(doc: Record<string, unknown>): string {
-  const code = doc.vendorCode;
-  const gstin = getPath(doc, [
-    "vendorDetails",
-    "companyOverviewDetails",
-    "gstin",
-  ]);
-  const parts = [
-    code != null ? `Code: ${String(code)}` : null,
-    gstin != null ? `GSTIN: ${String(gstin)}` : null,
-  ].filter(Boolean);
+function summaryLine(doc: Record<string, unknown>, fields: FieldConfig[]): string {
+  const parts: string[] = [];
+  for (const field of fields.slice(0, 3)) {
+    const val = getPath(doc, field.path.split("."));
+    if (val != null && String(val).trim() !== "") {
+      parts.push(`${field.label}: ${String(val)}`);
+    }
+  }
   return parts.length ? parts.join(" · ") : "Document";
 }
 
 export default function Home() {
+  const [fieldOptions, setFieldOptions] = useState<FieldConfig[]>([]);
+  const [collectionName, setCollectionName] = useState("");
+  const [requiresOrgOpuId, setRequiresOrgOpuId] = useState(true);
+  const [configLoading, setConfigLoading] = useState(true);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [orgId, setOrgId] = useState("");
+  const [orgOpuId, setOrgOpuId] = useState("");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [suggestions, setSuggestions] = useState<string[]>([]);
@@ -64,6 +59,37 @@ export default function Home() {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const fieldsSelected = selected.size > 0;
+  const searchFields = useMemo(() => Array.from(selected), [selected]);
+  const filtersReady =
+    orgId.trim() !== "" && (!requiresOrgOpuId || orgOpuId.trim() !== "");
+
+  useEffect(() => {
+    const ac = new AbortController();
+    setConfigLoading(true);
+    setConfigError(null);
+    fetchAppConfig({ signal: ac.signal })
+      .then((config) => {
+        setFieldOptions(config.fields);
+        setCollectionName(config.collectionName);
+        setRequiresOrgOpuId(config.requiresOrgOpuId);
+        setOrgOpuId("");
+        setSelected(new Set());
+        setResult(null);
+        setConfirmedQuery(null);
+        setSuggestions([]);
+      })
+      .catch((e) => {
+        if (ac.signal.aborted) return;
+        setFieldOptions([]);
+        setCollectionName("");
+        setRequiresOrgOpuId(true);
+        setConfigError(e instanceof Error ? e.message : "Failed to load config");
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setConfigLoading(false);
+      });
+    return () => ac.abort();
+  }, []);
 
   const toggleField = useCallback((id: string) => {
     setSelected((prev) => {
@@ -77,12 +103,11 @@ export default function Home() {
     setSuggestions([]);
   }, []);
 
-  // Fetch suggestions as user types (skip when a suggestion is already confirmed)
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     suggestAbortRef.current?.abort();
 
-    if (confirmedQuery || !query.trim() || !fieldsSelected) {
+    if (confirmedQuery || !query.trim() || !filtersReady) {
       if (!confirmedQuery) {
         setSuggestions([]);
         setShowSuggestions(false);
@@ -96,10 +121,12 @@ export default function Home() {
       const ac = new AbortController();
       suggestAbortRef.current = ac;
       try {
-        const data = await suggestVendors(
+        const data = await suggestPR(
           query.trim(),
-          Array.from(selected),
-          ac.signal,
+          searchFields,
+          orgId.trim(),
+          requiresOrgOpuId ? orgOpuId.trim() : undefined,
+          { signal: ac.signal },
         );
         if (!ac.signal.aborted) {
           setSuggestions(data.suggestions);
@@ -118,9 +145,8 @@ export default function Home() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       suggestAbortRef.current?.abort();
     };
-  }, [query, selected, fieldsSelected, confirmedQuery]);
+  }, [query, searchFields, filtersReady, confirmedQuery, orgId, orgOpuId, requiresOrgOpuId]);
 
-  // Close dropdown on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (
@@ -138,7 +164,6 @@ export default function Home() {
 
   const selectSuggestion = useCallback(
     async (value: string) => {
-      // Cancel any in-flight suggest calls first
       suggestAbortRef.current?.abort();
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
@@ -156,10 +181,12 @@ export default function Home() {
       searchAbortRef.current?.abort();
       searchAbortRef.current = ac;
       try {
-        const data = await searchVendors(
+        const data = await searchPR(
           value,
-          Array.from(selected),
-          ac.signal,
+          searchFields,
+          orgId.trim(),
+          requiresOrgOpuId ? orgOpuId.trim() : undefined,
+          { signal: ac.signal },
         );
         if (!ac.signal.aborted) setResult(data);
       } catch (e) {
@@ -170,7 +197,7 @@ export default function Home() {
         if (!ac.signal.aborted) setLoading(false);
       }
     },
-    [selected],
+    [searchFields, orgId, orgOpuId, requiresOrgOpuId],
   );
 
   const clearSearch = useCallback(() => {
@@ -194,26 +221,70 @@ export default function Home() {
     <main className="mx-auto max-w-5xl px-4 py-10">
       <header className="mb-8">
         <h1 className="text-2xl font-semibold tracking-tight text-[var(--foreground)]">
-          AutoSuggestions
+          Atlas Search AutoSuggestions
         </h1>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          Select fields first, then type to get suggestions from Atlas Search
-          autocomplete on{" "}
+          Atlas Search autocomplete on{" "}
           <code className="rounded bg-[var(--surface)] px-1 py-0.5 text-xs">
-            omOrgVendorDetails
+            {configLoading ? "…" : collectionName || "unknown collection"}
           </code>
-          .
         </p>
       </header>
 
-      {/* Step 1: Field selection */}
       <section className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-5 shadow-sm">
+        {/* Step 1: Org filters */}
         <fieldset>
           <legend className="text-sm font-medium text-[var(--muted)]">
-            1. Choose fields to search in
+            1. Organisation filters
+          </legend>
+          <div className={`mt-3 grid grid-cols-1 gap-3 ${requiresOrgOpuId ? "sm:grid-cols-2" : ""}`}>
+            <div>
+              <label className="mb-1 block text-xs text-[var(--muted)]">Org ID</label>
+              <input
+                type="text"
+                value={orgId}
+                onChange={(e) => {
+                  setOrgId(e.target.value);
+                  setResult(null);
+                  setConfirmedQuery(null);
+                }}
+                placeholder="Enter orgId"
+                className="w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none ring-[var(--accent)] placeholder:text-[var(--muted)] focus:ring-2"
+              />
+            </div>
+            {requiresOrgOpuId && (
+              <div>
+                <label className="mb-1 block text-xs text-[var(--muted)]">Org OPU ID</label>
+                <input
+                  type="text"
+                  value={orgOpuId}
+                  onChange={(e) => {
+                    setOrgOpuId(e.target.value);
+                    setResult(null);
+                    setConfirmedQuery(null);
+                  }}
+                  placeholder="Enter orgOpuId"
+                  className="w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none ring-[var(--accent)] placeholder:text-[var(--muted)] focus:ring-2"
+                />
+              </div>
+            )}
+          </div>
+        </fieldset>
+
+        {/* Step 2: Field selection */}
+        <fieldset className="mt-5">
+          <legend className="text-sm font-medium text-[var(--muted)]">
+            2. Choose fields to search in{" "}
+            <span className="font-normal">(optional — searches all fields if none selected)</span>
           </legend>
           <div className="mt-3 flex flex-wrap gap-2">
-            {FIELD_OPTIONS.map((f) => {
+            {configLoading && (
+              <p className="text-sm text-[var(--muted)]">Loading fields…</p>
+            )}
+            {!configLoading && fieldOptions.length === 0 && (
+              <p className="text-sm text-[var(--muted)]">No searchable fields configured.</p>
+            )}
+            {fieldOptions.map((f) => {
               const on = selected.has(f.id);
               return (
                 <button
@@ -233,10 +304,10 @@ export default function Home() {
           </div>
         </fieldset>
 
-        {/* Step 2: Search input (only after fields are selected) */}
+        {/* Step 3: Search input */}
         <div className="mt-5">
           <label className="block text-sm font-medium text-[var(--muted)]">
-            2. Search
+            3. Search
           </label>
           <div className="relative mt-2">
             <input
@@ -249,15 +320,25 @@ export default function Home() {
                   setShowSuggestions(true);
                 }
               }}
-              disabled={!fieldsSelected}
+              disabled={!filtersReady || configLoading || !!configError}
               placeholder={
-                fieldsSelected
-                  ? "Start typing…"
-                  : "Select at least one field above"
+                configLoading
+                  ? "Loading collection config…"
+                  : configError
+                    ? "Fix backend config to search"
+                    : !filtersReady
+                  ? requiresOrgOpuId
+                    ? "Enter orgId and orgOpuId above first"
+                    : "Enter orgId above first"
+                  : fieldsSelected
+                    ? "Start typing…"
+                    : "Start typing… (searching all fields)"
               }
               autoComplete="off"
               className={`w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none ring-[var(--accent)] placeholder:text-[var(--muted)] focus:ring-2 ${
-                !fieldsSelected ? "cursor-not-allowed opacity-50" : ""
+                !filtersReady || configLoading || !!configError
+                  ? "cursor-not-allowed opacity-50"
+                  : ""
               }`}
             />
             {query && (
@@ -270,7 +351,6 @@ export default function Home() {
               </button>
             )}
 
-            {/* Suggestions dropdown */}
             {showSuggestions && suggestions.length > 0 && !confirmedQuery && (
               <div
                 ref={dropdownRef}
@@ -301,20 +381,18 @@ export default function Home() {
           {!loading &&
             !confirmedQuery &&
             query.trim() &&
-            fieldsSelected &&
             suggestions.length > 0 && (
               <span>{suggestions.length} suggestion{suggestions.length === 1 ? "" : "s"}</span>
             )}
         </div>
       </section>
 
-      {error && (
+      {(error || configError) && (
         <p className="mt-4 rounded-md border border-red-900/50 bg-red-950/40 px-3 py-2 text-sm text-red-200">
-          {error}
+          {error || configError}
         </p>
       )}
 
-      {/* Documents shown only after selecting a suggestion */}
       {result && result.documents.length > 0 && (
         <ul className="mt-6 space-y-3">
           {result.documents.map((doc, i) => (
@@ -323,7 +401,7 @@ export default function Home() {
               className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4"
             >
               <p className="text-sm font-medium text-[var(--foreground)]">
-                {summaryLine(doc)}
+                {summaryLine(doc, fieldOptions)}
               </p>
               <pre className="mt-3 max-h-64 overflow-auto rounded bg-[var(--background)] p-3 text-xs leading-relaxed text-[var(--muted)]">
                 {JSON.stringify(doc, null, 2)}

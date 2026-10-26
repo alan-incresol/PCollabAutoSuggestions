@@ -5,9 +5,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     mongodb_uri: str
-    mongodb_db: str = "pcollab-quality"
-    search_index_name: str = "vendorDetails-lucene"
-    collection_name: str = "omOrgVendorDetails"
+    mongodb_db: str = "vendor_portal_qas"
+    search_index_name: str = "pr"
+    collection_name: str = "PurRequisitions"
     cors_origins: str = "http://localhost:4000"
     search_result_limit: int = 50
 

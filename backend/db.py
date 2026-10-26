@@ -12,5 +12,6 @@ def get_client() -> MongoClient:
     return _client
 
 
-def get_collection():
-    return get_client()[settings.mongodb_db][settings.collection_name]
+def get_collection(collection_name: str | None = None):
+    name = collection_name or settings.collection_name
+    return get_client()[settings.mongodb_db][name]

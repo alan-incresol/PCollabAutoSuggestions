@@ -7,20 +7,14 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from db import get_collection
+from search_registry import (
+    COLLECTION_REGISTRY,
+    get_collection_config,
+    list_known_collections,
+    resolve_collection_name,
+)
 
-FIELD_PATHS: dict[str, str] = {
-    "city": "vendorDetails.vendorAddressDetails.city",
-    "gstin": "vendorDetails.companyOverviewDetails.gstin",
-    "pointOfContactName": "vendorDetails.basicDetails.pointOfContactName",
-    "contactEmail": "vendorDetails.basicDetails.contactEmail",
-    "vendorCode": "vendorCode",
-    "erpSyncMsg": "erpSyncMsg",
-    "companyName" :"vendorDetails.basicDetails.companyName"
-}
-
-ALLOWED_FIELDS = frozenset(FIELD_PATHS.keys())
-
-app = FastAPI(title="Vendor Atlas Search API")
+app = FastAPI(title="PR Atlas Search API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,14 +42,34 @@ def serialize_doc(doc: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-class SearchRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=200)
-    fields: list[str] = Field(..., min_length=1)
-
-
 class SuggestRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=200)
-    fields: list[str] = Field(..., min_length=1)
+    fields: list[str] = Field(
+        default_factory=list,
+        description="Field ids to search; empty searches all indexed fields.",
+    )
+    orgId: str = Field(..., min_length=1)
+    orgOpuId: str = Field(default="")
+    collectionName: str | None = Field(
+        default=None,
+        description="MongoDB collection; default from COLLECTION_NAME env.",
+    )
+    searchIndexName: str | None = Field(
+        default=None,
+        description="Override Atlas index name from the built-in registry.",
+    )
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=200)
+    fields: list[str] = Field(
+        default_factory=list,
+        description="Field ids to search; empty searches all indexed fields.",
+    )
+    orgId: str = Field(..., min_length=1)
+    orgOpuId: str = Field(default="")
+    collectionName: str | None = Field(default=None)
+    searchIndexName: str | None = Field(default=None)
 
 
 class SuggestResponse(BaseModel):
@@ -65,6 +79,32 @@ class SuggestResponse(BaseModel):
 class SearchResponse(BaseModel):
     count: int
     documents: list[dict[str, Any]]
+
+
+class FieldConfig(BaseModel):
+    id: str
+    label: str
+    path: str
+
+
+class AppConfigResponse(BaseModel):
+    collectionName: str
+    searchIndexName: str
+    requiresOrgOpuId: bool
+    fields: list[FieldConfig]
+
+
+def _resolve_target(
+    collection_name: str | None, index_override: str | None
+) -> tuple[str, str, dict[str, str], bool]:
+    raw = collection_name or settings.collection_name
+    try:
+        coll = resolve_collection_name(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    config = COLLECTION_REGISTRY[coll]
+    index_name = (index_override or config.index_name).strip()
+    return coll, index_name, config.field_paths, config.requires_org_opu_id
 
 
 def _get_nested_values(doc: Any, parts: list[str]) -> list[str]:
@@ -85,26 +125,49 @@ def _get_nested_values(doc: Any, parts: list[str]) -> list[str]:
     return []
 
 
-def build_search_stage(query: str, fields: list[str]) -> dict[str, Any]:
-    paths = [FIELD_PATHS[f] for f in fields]
-    if len(paths) == 1:
-        return {
-            "$search": {
-                "index": settings.search_index_name,
-                "autocomplete": {"query": query, "path": paths[0]},
-            }
-        }
+def _resolve_fields(fields: list[str], field_paths: dict[str, str]) -> list[str]:
+    if fields:
+        return fields
+    return list(field_paths.keys())
+
+
+def build_search_stage(
+    query: str,
+    fields: list[str],
+    org_id: str,
+    org_opu_id: str,
+    index_name: str,
+    field_paths: dict[str, str],
+    requires_org_opu_id: bool,
+) -> dict[str, Any]:
+    search_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for field_key in fields:
+        path = field_paths[field_key]
+        if path not in seen_paths:
+            seen_paths.add(path)
+            search_paths.append(path)
+    filters: list[dict[str, Any]] = [
+        {"equals": {"path": "markAsDelete", "value": False}},
+        {"text": {"query": org_id, "path": "orgId"}},
+    ]
+    if requires_org_opu_id:
+        filters.append({"text": {"query": org_opu_id, "path": "orgOpuId"}})
     return {
         "$search": {
-            "index": settings.search_index_name,
+            "index": index_name,
             "compound": {
-                "should": [
-                    {"autocomplete": {"query": query, "path": p}} for p in paths
-                ],
+                "filter": filters,
+                "should": [{"autocomplete": {"query": query, "path": p}} for p in search_paths],
                 "minimumShouldMatch": 1,
             },
         }
     }
+
+
+def _validate_org_filters(org_opu_id: str, requires_org_opu_id: bool) -> None:
+    if requires_org_opu_id and not org_opu_id.strip():
+        raise HTTPException(status_code=400, detail="orgOpuId is required for this collection")
 
 
 @app.get("/health")
@@ -112,18 +175,38 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/config", response_model=AppConfigResponse)
+def app_config():
+    config = get_collection_config(settings.collection_name)
+    return AppConfigResponse(**config)
+
+
 @app.post("/suggest", response_model=SuggestResponse)
 def suggest(body: SuggestRequest):
-    unknown = [f for f in body.fields if f not in ALLOWED_FIELDS]
+    coll_name, index_name, field_paths, requires_org_opu_id = _resolve_target(
+        body.collectionName, body.searchIndexName
+    )
+    _validate_org_filters(body.orgOpuId, requires_org_opu_id)
+    search_fields = _resolve_fields(body.fields, field_paths)
+    allowed = frozenset(field_paths.keys())
+    unknown = [f for f in search_fields if f not in allowed]
     if unknown:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown fields: {unknown}. Allowed: {sorted(ALLOWED_FIELDS)}",
+            detail=f"Unknown fields: {unknown}. Allowed for {coll_name}: {sorted(allowed)}",
         )
 
-    coll = get_collection()
+    coll = get_collection(coll_name)
     pipeline: list[dict[str, Any]] = [
-        build_search_stage(body.query.strip(), body.fields),
+        build_search_stage(
+            body.query.strip(),
+            search_fields,
+            body.orgId,
+            body.orgOpuId,
+            index_name,
+            field_paths,
+            requires_org_opu_id,
+        ),
         {"$limit": settings.search_result_limit},
     ]
 
@@ -132,8 +215,8 @@ def suggest(body: SuggestRequest):
         seen: set[str] = set()
         q_lower = body.query.strip().lower()
         for doc in cursor:
-            for field_key in body.fields:
-                path_parts = FIELD_PATHS[field_key].split(".")
+            for field_key in search_fields:
+                path_parts = field_paths[field_key].split(".")
                 for val in _get_nested_values(doc, path_parts):
                     stripped = val.strip()
                     if stripped and q_lower in stripped.lower():
@@ -141,7 +224,6 @@ def suggest(body: SuggestRequest):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Suggest failed: {e!s}") from e
 
-    # Deduplicate case-insensitively, keeping the first-seen casing
     unique: dict[str, str] = {}
     for v in sorted(seen):
         key = v.lower()
@@ -152,16 +234,30 @@ def suggest(body: SuggestRequest):
 
 @app.post("/search", response_model=SearchResponse)
 def search(body: SearchRequest):
-    unknown = [f for f in body.fields if f not in ALLOWED_FIELDS]
+    coll_name, index_name, field_paths, requires_org_opu_id = _resolve_target(
+        body.collectionName, body.searchIndexName
+    )
+    _validate_org_filters(body.orgOpuId, requires_org_opu_id)
+    search_fields = _resolve_fields(body.fields, field_paths)
+    allowed = frozenset(field_paths.keys())
+    unknown = [f for f in search_fields if f not in allowed]
     if unknown:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown fields: {unknown}. Allowed: {sorted(ALLOWED_FIELDS)}",
+            detail=f"Unknown fields: {unknown}. Allowed for {coll_name}: {sorted(allowed)}",
         )
 
-    coll = get_collection()
+    coll = get_collection(coll_name)
     pipeline: list[dict[str, Any]] = [
-        build_search_stage(body.query.strip(), body.fields),
+        build_search_stage(
+            body.query.strip(),
+            search_fields,
+            body.orgId,
+            body.orgOpuId,
+            index_name,
+            field_paths,
+            requires_org_opu_id,
+        ),
         {"$limit": settings.search_result_limit},
     ]
 
@@ -177,6 +273,6 @@ def search(body: SearchRequest):
     return SearchResponse(count=len(docs), documents=docs)
 
 
-if __name__=='__main__':
+if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app",port =5000)
+    uvicorn.run("main:app", port=5000,reload=True,host="0.0.0.0")
