@@ -1,6 +1,6 @@
-const base = (
-  process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:5000"
-).replace(/\/$/, "");
+// Empty base keeps requests on this Next server, which proxies to the backend.
+// An absolute NEXT_PUBLIC_API_URL is only for calling the API from another host.
+const base = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
 
 export type SuggestResponse = {
   suggestions: string[];
