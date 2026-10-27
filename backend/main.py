@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from config import get_settings, settings
+from config import ENV_FILE, get_settings, settings
 from db import get_collection
 from search_registry import (
     COLLECTION_REGISTRY,
@@ -15,6 +15,14 @@ from search_registry import (
 )
 
 app = FastAPI(title="PR Atlas Search API")
+
+_boot = get_settings()
+print(
+    f"Settings file: {ENV_FILE} "
+    f"(exists={ENV_FILE.is_file()}) "
+    f"db={_boot.mongodb_db} collection={_boot.collection_name} "
+    f"index={_boot.search_index_name}"
+)
 
 app.add_middleware(
     CORSMiddleware,
