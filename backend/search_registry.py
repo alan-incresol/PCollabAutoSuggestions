@@ -93,6 +93,8 @@ class CollectionConfig:
     index_name: str
     field_paths: dict[str, str]
     requires_org_opu_id: bool = True
+    # Field ids whose typed text is spell-corrected with Jev before searching (see correction.py).
+    correctable_fields: tuple[str, ...] = ()
 
 
 # collection_name -> search config
@@ -105,7 +107,10 @@ COLLECTION_REGISTRY: dict[str, CollectionConfig] = {
     "RfqData": CollectionConfig("rfq_data", FIELD_PATHS_RFQ),
     "MaterialMaster": CollectionConfig("material-master", FIELD_PATHS_MATERIAL_MASTER),
     "OmOrgVendorDetails": CollectionConfig(
-        "vendor-master", FIELD_PATHS_VENDOR_MASTER, requires_org_opu_id=False
+        "vendor-master",
+        FIELD_PATHS_VENDOR_MASTER,
+        requires_org_opu_id=False,
+        correctable_fields=("companyName",),
     ),
     "OmOrgPurInvoices": _INVOICES_CFG,
     "Invoices": _INVOICES_CFG,

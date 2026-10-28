@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 # Always this file, not the process working directory and not another service's env file.
@@ -17,6 +18,11 @@ class Settings(BaseSettings):
     collection_name: str = "PurRequisitions"
     cors_origins: str = "http://localhost:4000"
     search_result_limit: int = 50
+    # Jev (TypeSafe AI) spell correction; skipped while the key is empty.
+    typesafe_api_key: SecretStr = SecretStr("")
+    typesafe_model: str = "jev-latest"
+    correction_timeout_seconds: float = 5.0
+    correction_min_confidence: float = 0.6
 
     @classmethod
     def settings_customise_sources(
