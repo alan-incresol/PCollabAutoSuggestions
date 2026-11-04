@@ -2,6 +2,8 @@
 .env.local
 backend/.env
 frontend/.env.local
+hybrid-backend/.env
+hybrid-frontend/.env.local
 __pycache__/
 *.pyc
 .venv/
@@ -9,3 +11,5 @@ venv/
 node_modules/
 .next/
 out/
+*.json
+*.service
