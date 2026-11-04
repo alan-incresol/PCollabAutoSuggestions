@@ -11,5 +11,4 @@ venv/
 node_modules/
 .next/
 out/
-*.json
 *.service
