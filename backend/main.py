@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 
 from bson import ObjectId
@@ -6,9 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from config import ENV_FILE, get_settings, settings
+from correction import MIN_QUERY_LENGTH, correct_query
 from db import get_collection
 from search_registry import (
     COLLECTION_REGISTRY,
+    field_label,
     get_collection_config,
     list_known_collections,
     resolve_collection_name,
@@ -147,6 +150,7 @@ def build_search_stage(
     index_name: str,
     field_paths: dict[str, str],
     requires_org_opu_id: bool,
+    fuzzy: bool = False,
 ) -> dict[str, Any]:
     search_paths: list[str] = []
     seen_paths: set[str] = set()
@@ -161,12 +165,16 @@ def build_search_stage(
     ]
     if requires_org_opu_id:
         filters.append({"text": {"query": org_opu_id, "path": "orgOpuId"}})
+    # Fuzzy matching is a query option, so the existing autocomplete index serves it unchanged.
+    extra: dict[str, Any] = {"fuzzy": {"maxEdits": 2}} if fuzzy else {}
     return {
         "$search": {
             "index": index_name,
             "compound": {
                 "filter": filters,
-                "should": [{"autocomplete": {"query": query, "path": p}} for p in search_paths],
+                "should": [
+                    {"autocomplete": {"query": query, "path": p, **extra}} for p in search_paths
+                ],
                 "minimumShouldMatch": 1,
             },
         }
@@ -176,6 +184,66 @@ def build_search_stage(
 def _validate_org_filters(org_opu_id: str, requires_org_opu_id: bool) -> None:
     if requires_org_opu_id and not org_opu_id.strip():
         raise HTTPException(status_code=400, detail="orgOpuId is required for this collection")
+
+
+@dataclass(frozen=True)
+class _Target:
+    coll_name: str
+    index_name: str
+    field_paths: dict[str, str]
+    requires_org_opu_id: bool
+    org_id: str
+    org_opu_id: str
+
+    def run(self, query: str, fields: list[str], *, fuzzy: bool = False) -> list[dict[str, Any]]:
+        pipeline: list[dict[str, Any]] = [
+            build_search_stage(
+                query,
+                fields,
+                self.org_id,
+                self.org_opu_id,
+                self.index_name,
+                self.field_paths,
+                self.requires_org_opu_id,
+                fuzzy=fuzzy,
+            ),
+            {"$limit": get_settings().search_result_limit},
+        ]
+        return list(get_collection(self.coll_name).aggregate(pipeline))
+
+
+def _distinct_values(
+    docs: list[dict[str, Any]], fields: list[str], field_paths: dict[str, str]
+) -> list[str]:
+    """Unique non-empty string values of `fields` across `docs`, in result (relevance) order."""
+    seen: dict[str, str] = {}
+    for doc in docs:
+        for field_key in fields:
+            for val in _get_nested_values(doc, field_paths[field_key].split(".")):
+                stripped = val.strip()
+                if stripped and stripped.lower() not in seen:
+                    seen[stripped.lower()] = stripped
+    return list(seen.values())
+
+
+def _search_with_correction(
+    target: _Target, query: str, search_fields: list[str]
+) -> tuple[str, list[dict[str, Any]]]:
+    """Search with Jev's spelling correction on correctable fields; fall back to the text as typed.
+
+    Returns the query that produced the documents along with them.
+    """
+    correctable_ids = COLLECTION_REGISTRY[target.coll_name].correctable_fields
+    correctable = [f for f in search_fields if f in correctable_ids]
+    if correctable and len(query) >= MIN_QUERY_LENGTH:
+        nearby = target.run(query, correctable, fuzzy=True)
+        candidates = _distinct_values(nearby, correctable, target.field_paths)
+        corrected = correct_query(query, candidates, field_label(correctable[0]))
+        if corrected:
+            docs = target.run(corrected, search_fields)
+            if docs:
+                return corrected, docs
+    return query, target.run(query, search_fields)
 
 
 @app.get("/health")
@@ -204,25 +272,15 @@ def suggest(body: SuggestRequest):
             detail=f"Unknown fields: {unknown}. Allowed for {coll_name}: {sorted(allowed)}",
         )
 
-    coll = get_collection(coll_name)
-    pipeline: list[dict[str, Any]] = [
-        build_search_stage(
-            body.query.strip(),
-            search_fields,
-            body.orgId,
-            body.orgOpuId,
-            index_name,
-            field_paths,
-            requires_org_opu_id,
-        ),
-        {"$limit": get_settings().search_result_limit},
-    ]
+    target = _Target(
+        coll_name, index_name, field_paths, requires_org_opu_id, body.orgId, body.orgOpuId
+    )
 
     try:
-        cursor = coll.aggregate(pipeline)
+        effective_query, docs = _search_with_correction(target, body.query.strip(), search_fields)
         seen: set[str] = set()
-        q_lower = body.query.strip().lower()
-        for doc in cursor:
+        q_lower = effective_query.lower()
+        for doc in docs:
             for field_key in search_fields:
                 path_parts = field_paths[field_key].split(".")
                 for val in _get_nested_values(doc, path_parts):
@@ -255,23 +313,13 @@ def search(body: SearchRequest):
             detail=f"Unknown fields: {unknown}. Allowed for {coll_name}: {sorted(allowed)}",
         )
 
-    coll = get_collection(coll_name)
-    pipeline: list[dict[str, Any]] = [
-        build_search_stage(
-            body.query.strip(),
-            search_fields,
-            body.orgId,
-            body.orgOpuId,
-            index_name,
-            field_paths,
-            requires_org_opu_id,
-        ),
-        {"$limit": get_settings().search_result_limit},
-    ]
+    target = _Target(
+        coll_name, index_name, field_paths, requires_org_opu_id, body.orgId, body.orgOpuId
+    )
 
     try:
-        cursor = coll.aggregate(pipeline)
-        docs = [serialize_doc(d) for d in cursor]
+        _, found = _search_with_correction(target, body.query.strip(), search_fields)
+        docs = [serialize_doc(d) for d in found]
     except Exception as e:
         raise HTTPException(
             status_code=502,
